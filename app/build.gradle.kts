@@ -140,6 +140,7 @@ dependencies {
     implementation("androidx.media3:media3-exoplayer:1.10.1")
     implementation("androidx.media3:media3-ui:1.10.1")
     implementation("androidx.media3:media3-session:1.10.1")
+    implementation("com.google.android.gms:play-services-cast-framework:22.3.1")
     implementation(project(":mpv-android-lib"))
 
     implementation("io.github.kyant0:backdrop:2.0.0")
