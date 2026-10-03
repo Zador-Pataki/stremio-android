@@ -8,6 +8,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stremio.core.runtime.RuntimeEvent
 import com.stremio.core.runtime.msg.Event
+import com.stremio.mobile.cast.CastPlaybackController
+import com.stremio.mobile.cast.CastPlaybackState
+import com.stremio.mobile.cast.CastPlayerAdapter
 import com.stremio.mobile.core.CoreStream
 import com.stremio.mobile.core.StremioCore
 import com.stremio.mobile.core.utils.parseStreamDescription
@@ -66,6 +69,13 @@ class MainViewModel(
     appContext: Context,
 ) : ViewModel() {
     private val appContext = appContext.applicationContext
+    private val castController = CastPlaybackController(this.appContext)
+    private val castPlayer = CastPlayerAdapter(castController)
+    val castState: StateFlow<CastPlaybackState> = castController.state
+    private var castActiveSource: String? = null
+    private var castLoadRequestedFor: String? = null
+    private var castEndedGeneration = 0L
+    private var castLastRemotePlaying: Boolean? = null
     private val latestIntentUri = MutableStateFlow<String?>(null)
     private val account = MutableStateFlow(authRepository.accountFromCore())
     private var authInFlight = false
@@ -291,6 +301,7 @@ class MainViewModel(
         refreshLibrary()
         observeCoreAuth()
         observeStreamingServer()
+        observeCasting()
         restoreCoreSession()
         checkForUpdates(manual = true)
 
@@ -300,6 +311,79 @@ class MainViewModel(
             while (true) {
                 delay(60_000L)
                 stopServerIfIdle()
+            }
+        }
+    }
+
+    private fun observeCasting() {
+        viewModelScope.launch(Dispatchers.Main.immediate) { castController.start() }
+
+        viewModelScope.launch {
+            combine(castState, playbackState, playerOpen) { cast, playback, open -> Triple(cast, playback, open) }
+                .collect { (cast, playback, open) ->
+                    val source = playback.activeUri
+                    val previousSource = castActiveSource
+                    val active = open && cast.connected && source != null && cast.mediaSource == source
+
+                    if (active && previousSource != source) {
+                        playbackRepository.getPlayer()?.pause()
+                        playbackRepository.reportPausedChanged(false)
+                        castActiveSource = source
+                        castLoadRequestedFor = source
+                        castLastRemotePlaying = castController.runtimeState.value.isPlaying
+                    } else if (!active && previousSource != null) {
+                        if (!cast.connected && open && source == previousSource) {
+                            val remote = castController.runtimeState.value
+                            playbackRepository.getPlayer()?.let { local ->
+                                if (remote.positionMs > 0L) {
+                                    local.seekTo(remote.positionMs)
+                                    if (remote.durationMs > 0L) playbackRepository.reportSeek(remote.positionMs, remote.durationMs)
+                                }
+                                if (remote.isPlaying) local.play() else local.pause()
+                                playbackRepository.reportPausedChanged(!remote.isPlaying)
+                            }
+                            castLoadRequestedFor = null
+                        } else if (cast.connected && open && source != null && source != previousSource) {
+                            playbackRepository.getPlayer()?.pause()
+                        }
+                        castActiveSource = null
+                        castLastRemotePlaying = null
+                    }
+
+                    if (cast.error != null && castLoadRequestedFor == source && cast.mediaSource != source) {
+                        if (open) playbackRepository.getPlayer()?.play()
+                        castLoadRequestedFor = null
+                    }
+
+                    if (cast.connected && open && source != null && cast.mediaSource != source && castLoadRequestedFor != source) {
+                        castLoadRequestedFor = source
+                        val localState = playbackRepository.getPlayer()?.runtimeState?.value
+                        castController.load(
+                            sourceUri = source,
+                            title = playback.title ?: "Stream",
+                            startPositionMs = localState?.positionMs ?: 0L,
+                            durationHintMs = localState?.durationMs ?: 0L,
+                        )
+                    }
+
+                    if (cast.endedGeneration > castEndedGeneration) {
+                        castEndedGeneration = cast.endedGeneration
+                        if (active && open) onPlaybackEnded()
+                    }
+                }
+        }
+
+        viewModelScope.launch {
+            castController.runtimeState.collect { remote ->
+                if (castActiveSource == null) {
+                    castLastRemotePlaying = null
+                    return@collect
+                }
+                val previous = castLastRemotePlaying
+                if (previous != null && previous != remote.isPlaying && !remote.isBuffering && !remote.ended) {
+                    playbackRepository.reportPausedChanged(!remote.isPlaying)
+                }
+                castLastRemotePlaying = remote.isPlaying
             }
         }
     }
@@ -1424,6 +1508,17 @@ class MainViewModel(
     }
 
     fun closePlayer() {
+        val currentCast = castState.value
+        val currentPlayback = playbackState.value
+        if (currentCast.connected) {
+            if (currentCast.mediaSource != null && currentCast.mediaSource == currentPlayback.activeUri) {
+                val remote = castController.runtimeState.value
+                if (remote.durationMs > 0L) playbackRepository.reportTimeChanged(remote.positionMs, remote.durationMs)
+            }
+            castActiveSource = null
+            castLoadRequestedFor = null
+            castController.endCurrentSession(stopReceiver = true)
+        }
         playJob?.cancel()
         playJob = null
         nextVideoJob?.cancel()
@@ -1615,7 +1710,14 @@ class MainViewModel(
         }
     }
 
-    fun getPlayer(): com.stremio.mobile.player.Player? = playbackRepository.getPlayer()
+    fun getPlayer(cast: CastPlaybackState = castState.value): com.stremio.mobile.player.Player? {
+        val currentSource = playbackState.value.activeUri
+        return if (cast.connected && currentSource != null && cast.mediaSource == currentSource) {
+            castPlayer
+        } else {
+            playbackRepository.getPlayer()
+        }
+    }
 
     fun acceptIntent(intent: Intent?) {
         latestIntentUri.value = intent?.dataString
@@ -2089,6 +2191,11 @@ class MainViewModel(
                     null
                 }
             }
+    }
+
+    override fun onCleared() {
+        castController.close()
+        super.onCleared()
     }
 
     private fun sha256(input: String): String {
