@@ -531,8 +531,9 @@ fun StremioMobileApp(viewModel: MainViewModel) {
 
             if (isPlayerOpen) {
                 val playbackState by viewModel.playbackState.collectAsStateWithLifecycle()
+                val castState by viewModel.castState.collectAsStateWithLifecycle()
                 PlayerScreen(
-                    player = viewModel.getPlayer(),
+                    player = viewModel.getPlayer(castState),
                     activeUri = playbackState.activeUri,
                     title = playbackState.title ?: "Stream",
                     onAttachView = viewModel::attachPlayerView,
