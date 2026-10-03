@@ -24,6 +24,10 @@
         android:theme="@style/Theme.StremioMobile"
         android:usesCleartextTraffic="true">
 
+        <meta-data
+            android:name="com.google.android.gms.cast.framework.OPTIONS_PROVIDER_CLASS_NAME"
+            android:value="com.stremio.mobile.cast.StremioCastOptionsProvider" />
+
         <!-- Disable Firebase Advertising ID collection and ad personalization signals -->
         <meta-data
             android:name="google_analytics_adid_collection_enabled"
