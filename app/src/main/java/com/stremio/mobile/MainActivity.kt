@@ -12,7 +12,6 @@ import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
-import com.stremio.mobile.auth.FacebookLoginBridge
 import com.stremio.mobile.presentation.screens.StremioMobileApp
 import com.stremio.mobile.presentation.viewmodel.MainViewModel
 
@@ -61,14 +60,6 @@ class MainActivity : FragmentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         viewModel.acceptIntent(intent)
-    }
-
-    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        if (FacebookLoginBridge.callbackManager.onActivityResult(requestCode, resultCode, data)) {
-            return
-        }
-        super.onActivityResult(requestCode, resultCode, data)
     }
 
     override fun onStart() {
