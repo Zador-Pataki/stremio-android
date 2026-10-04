@@ -1,0 +1,76 @@
+name: Chromecast APK Build
+
+on:
+  push:
+    branches:
+      - chromecast-v1
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Chromecast ARM64 APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Add matching ARM64 stream-server JNI
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          curl -fL             "https://github.com/stremio-native/stremio-android/releases/download/v1.2.4/StremioMobile-v1.2.4-arm64-v8a-release.apk"             -o /tmp/upstream-arm64.apk
+          unzip -j -o /tmp/upstream-arm64.apk             "lib/arm64-v8a/libstream_server.so"             -d app/src/main/jniLibs/arm64-v8a/
+          test -s app/src/main/jniLibs/arm64-v8a/libstream_server.so
+          ls -lh app/src/main/jniLibs/arm64-v8a/libstream_server.so
+
+      - name: Configure stable custom signing
+        shell: bash
+        env:
+          CUSTOM_KEYSTORE_B64: "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"
+        run: |
+          set -euo pipefail
+          keystore="${RUNNER_TEMP}/stremio-custom-debug.jks"
+          printf '%s' "${CUSTOM_KEYSTORE_B64}" | base64 --decode > "${keystore}"
+          echo "ANDROID_KEYSTORE_FILE=${keystore}" >> "${GITHUB_ENV}"
+          echo "ANDROID_KEYSTORE_PASSWORD=stremiochromecast" >> "${GITHUB_ENV}"
+          echo "ANDROID_KEY_ALIAS=stremio-custom" >> "${GITHUB_ENV}"
+          echo "ANDROID_KEY_PASSWORD=stremiochromecast" >> "${GITHUB_ENV}"
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make Gradle executable
+        run: chmod +x ./gradlew
+
+      - name: Build debug APK
+        run: ./gradlew :app:compileDebugKotlin :app:assembleDebug --warning-mode all
+
+      - name: Verify ARM64 APK contains stream server
+        shell: bash
+        run: |
+          set -euo pipefail
+          apk="$(find app/build/outputs/apk/debug -maxdepth 1 -type f -name '*arm64-v8a*debug*.apk' | head -n1)"
+          test -n "$apk"
+          unzip -l "$apk" | grep -q "lib/arm64-v8a/libstream_server.so"
+          echo "Verified: $apk"
+          cp "$apk" app/build/outputs/apk/debug/Stremio-Chromecast-arm64.apk
+
+      - name: Upload ARM64 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: stremio-chromecast-arm64
+          path: app/build/outputs/apk/debug/Stremio-Chromecast-arm64.apk
+          if-no-files-found: error

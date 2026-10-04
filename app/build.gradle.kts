@@ -133,13 +133,12 @@ dependencies {
     implementation("androidx.navigation:navigation-compose:2.9.8")
     implementation("androidx.fragment:fragment:1.5.4")
 
-    implementation("com.facebook.android:facebook-login:18.2.3")
-
     implementation(files("libs/rustls-platform-verifier-0.1.1.aar"))
 
     implementation("androidx.media3:media3-exoplayer:1.10.1")
     implementation("androidx.media3:media3-ui:1.10.1")
     implementation("androidx.media3:media3-session:1.10.1")
+    implementation("com.google.android.gms:play-services-cast-framework:22.3.1")
     implementation(project(":mpv-android-lib"))
 
     implementation("io.github.kyant0:backdrop:2.0.0")

@@ -106,6 +106,16 @@ class StremioCore(context: Context) {
         )
     }
 
+    fun loginWithFacebookCredentials(email: String, fbLoginToken: String) {
+        authenticate(
+            AuthRequest(
+                AuthRequest.Type.Login(
+                    AuthRequest.Login(email = email, password = fbLoginToken, facebook = true),
+                ),
+            ),
+        )
+    }
+
     fun register(email: String, password: String, marketing: Boolean) {
         val consent = GDPRConsent(tos = true, privacy = true, marketing = marketing, from = "stremio-mobile")
         authenticate(

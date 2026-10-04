@@ -66,6 +66,8 @@ import coil3.compose.AsyncImage
 import com.kyant.backdrop.backdrops.LayerBackdrop
 import com.kyant.backdrop.backdrops.layerBackdrop
 import com.kyant.backdrop.backdrops.rememberLayerBackdrop
+import com.stremio.mobile.cast.CastPlayerAdapter
+import com.stremio.mobile.cast.CastRouteButton
 import com.stremio.mobile.core.theme.AccentPurple
 import com.stremio.mobile.core.theme.AccentGreen
 import com.stremio.mobile.core.theme.GlassSurface
@@ -368,7 +370,8 @@ fun PlayerScreen(
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) {
                 val playBg = profileSettings?.playInBackground ?: false
-                if (!playBg) {
+                // A Cast receiver is independent of the sender lifecycle.
+                if (!playBg && player !is CastPlayerAdapter) {
                     player?.pause()
                 }
             }
@@ -882,6 +885,15 @@ fun PlayerScreen(
                 actions = controlsActions,
                 backdrop = controlsBackdrop,
                 modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        if (showControls) {
+            CastRouteButton(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(top = 18.dp, end = if (globalUiStyle == "modern") 72.dp else 16.dp)
+                    .size(48.dp),
             )
         }
 

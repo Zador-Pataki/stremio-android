@@ -308,6 +308,10 @@ class AuthRepository(
         core.loginWithFacebook(token)
     }
 
+    suspend fun loginWithFacebookCredentials(email: String, fbLoginToken: String) {
+        core.loginWithFacebookCredentials(email, fbLoginToken)
+    }
+
     suspend fun login(email: String, password: String) {
         core.login(email.trim(), password)
     }

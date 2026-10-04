@@ -8,6 +8,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.stremio.core.runtime.RuntimeEvent
 import com.stremio.core.runtime.msg.Event
+import com.stremio.mobile.cast.CastPlaybackController
+import com.stremio.mobile.cast.CastPlaybackState
+import com.stremio.mobile.cast.CastPlayerAdapter
 import com.stremio.mobile.core.CoreStream
 import com.stremio.mobile.core.StremioCore
 import com.stremio.mobile.core.utils.parseStreamDescription
@@ -66,6 +69,13 @@ class MainViewModel(
     appContext: Context,
 ) : ViewModel() {
     private val appContext = appContext.applicationContext
+    private val castController = CastPlaybackController(this.appContext)
+    private val castPlayer = CastPlayerAdapter(castController)
+    val castState: StateFlow<CastPlaybackState> = castController.state
+    private var castActiveSource: String? = null
+    private var castLoadRequestedFor: String? = null
+    private var castEndedGeneration = 0L
+    private var castLastRemotePlaying: Boolean? = null
     private val latestIntentUri = MutableStateFlow<String?>(null)
     private val account = MutableStateFlow(authRepository.accountFromCore())
     private var authInFlight = false
@@ -291,15 +301,89 @@ class MainViewModel(
         refreshLibrary()
         observeCoreAuth()
         observeStreamingServer()
+        observeCasting()
         restoreCoreSession()
         checkForUpdates(manual = true)
 
-        startServer() // Always start the streaming server on app startup
-
+        // The native streaming server is started lazily only for streams that need it.
+        // Browsing, authentication, and addon stream discovery do not require the server.
         viewModelScope.launch {
             while (true) {
                 delay(60_000L)
                 stopServerIfIdle()
+            }
+        }
+    }
+
+    private fun observeCasting() {
+        viewModelScope.launch(Dispatchers.Main.immediate) { castController.start() }
+
+        viewModelScope.launch {
+            combine(castState, playbackState, playerOpen) { cast, playback, open -> Triple(cast, playback, open) }
+                .collect { (cast, playback, open) ->
+                    val source = playback.activeUri
+                    val previousSource = castActiveSource
+                    val active = open && cast.connected && source != null && cast.mediaSource == source
+
+                    if (active && previousSource != source) {
+                        playbackRepository.getPlayer()?.pause()
+                        playbackRepository.reportPausedChanged(false)
+                        castActiveSource = source
+                        castLoadRequestedFor = source
+                        castLastRemotePlaying = castController.runtimeState.value.isPlaying
+                    } else if (!active && previousSource != null) {
+                        if (!cast.connected && open && source == previousSource) {
+                            val remote = castController.runtimeState.value
+                            playbackRepository.getPlayer()?.let { local ->
+                                if (remote.positionMs > 0L) {
+                                    local.seekTo(remote.positionMs)
+                                    if (remote.durationMs > 0L) playbackRepository.reportSeek(remote.positionMs, remote.durationMs)
+                                }
+                                if (remote.isPlaying) local.play() else local.pause()
+                                playbackRepository.reportPausedChanged(!remote.isPlaying)
+                            }
+                            castLoadRequestedFor = null
+                        } else if (cast.connected && open && source != null && source != previousSource) {
+                            playbackRepository.getPlayer()?.pause()
+                        }
+                        castActiveSource = null
+                        castLastRemotePlaying = null
+                    }
+
+                    if (cast.error != null && castLoadRequestedFor == source && cast.mediaSource != source) {
+                        if (open) playbackRepository.getPlayer()?.play()
+                        castLoadRequestedFor = null
+                    }
+
+                    if (cast.connected && open && source != null && cast.mediaSource != source && castLoadRequestedFor != source) {
+                        castLoadRequestedFor = source
+                        val localState = playbackRepository.getPlayer()?.runtimeState?.value
+                        castController.load(
+                            sourceUri = source,
+                            title = playback.title ?: "Stream",
+                            startPositionMs = localState?.positionMs ?: 0L,
+                            durationHintMs = localState?.durationMs ?: 0L,
+                        )
+                    }
+
+                    if (cast.endedGeneration > castEndedGeneration) {
+                        castEndedGeneration = cast.endedGeneration
+                        if (active && open) onPlaybackEnded()
+                    }
+                }
+        }
+
+        viewModelScope.launch {
+            castController.runtimeState.collect { remote ->
+                if (castActiveSource == null) {
+                    castLastRemotePlaying = null
+                    return@collect
+                }
+                val previous = castLastRemotePlaying
+                if (previous != null && previous != remote.isPlaying && !remote.isBuffering && !remote.ended) {
+                    playbackRepository.reportPausedChanged(!remote.isPlaying)
+                }
+                castLastRemotePlaying = remote.isPlaying
             }
         }
     }
@@ -650,70 +734,9 @@ class MainViewModel(
     }
 
     fun checkForUpdates(manual: Boolean) {
-        viewModelScope.launch {
-            if (!manual) {
-                if (!isAutoUpdateEnabled.value) return@launch
-                val lastCheckMs = authRepository.getLastUpdateCheckMs()
-                if (System.currentTimeMillis() - lastCheckMs < UPDATE_CHECK_INTERVAL_MS) return@launch
-            }
-
-            com.posthog.PostHog.capture(
-                event = "Update Check Started",
-                properties = mapOf("manual" to manual)
-            )
-
-            _updateState.value = UpdateState.Checking
-            when (val result = runCatching { updateRepository.check() }.getOrElse { error ->
-                UpdateState.Error(error.message ?: "Update check failed.")
-            }) {
-                is UpdateState.Available -> {
-                    authRepository.setLastUpdateCheckMs(System.currentTimeMillis())
-                    com.posthog.PostHog.capture(
-                        event = "Update Check Finished",
-                        properties = mapOf(
-                            "status" to "Available",
-                            "version" to result.info.tagName,
-                            "manual" to manual
-                        )
-                    )
-                    if (!manual && authRepository.getIgnoredUpdateVersion() == result.info.tagName) {
-                        _updateState.value = UpdateState.Idle
-                    } else {
-                        _updateState.value = result
-                    }
-                }
-                is UpdateState.UpToDate -> {
-                    authRepository.setLastUpdateCheckMs(System.currentTimeMillis())
-                    com.posthog.PostHog.capture(
-                        event = "Update Check Finished",
-                        properties = mapOf(
-                            "status" to "UpToDate",
-                            "manual" to manual
-                        )
-                    )
-                    _updateState.value = result
-                }
-                is UpdateState.Error -> {
-                    com.posthog.PostHog.capture(
-                        event = "Update Check Finished",
-                        properties = mapOf(
-                            "status" to "Error",
-                            "error_message" to result.message,
-                            "manual" to manual
-                        )
-                    )
-                    if (manual) {
-                        _updateState.value = result
-                    } else {
-                        Timber.e("Auto update check failed: ${result.message}")
-                        _updateState.value = UpdateState.Idle
-                    }
-                }
-                else -> {
-                    _updateState.value = result
-                }
-            }
-        }
+        // Custom Chromecast build: never offer upstream APKs, because installing one would
+        // replace this build with vanilla Stremio and remove Chromecast support.
+        _updateState.value = UpdateState.Idle
     }
 
     fun downloadAndInstallUpdate(info: UpdateInfo) {
@@ -1038,8 +1061,6 @@ class MainViewModel(
         )
 
         streamsJob = viewModelScope.launch {
-            runCatching { startServerInternal() }
-
             val videoId = if (isSeries) item.continueWatchingVideoId else null
             val matchedOption = runCatching {
                 withTimeoutOrNull(30_000) {
@@ -1058,8 +1079,7 @@ class MainViewModel(
                                     )
                                 }
                             }
-                            catalogRepository.extractStreams(details)
-                                .mapIndexed { index, coreStream -> buildStreamOption(index, coreStream) }
+                            safeBuildStreamOptions(details)
                                 .firstOrNull { rememberedSelection.matches(it) }
                         }
                         .first { it != null }
@@ -1090,9 +1110,8 @@ class MainViewModel(
         streams.value = StreamsUiState(forItem = item, isOpen = true, isLoading = true, isSeries = isSeries)
 
         return viewModelScope.launch {
-            runCatching { startServerInternal() }
-
-            if (isSeries) {
+            try {
+                if (isSeries) {
                 val collector = launch {
                     catalogRepository.getMetaDetailsFlow(type = item.type, id = item.id, videoId = null, guessStreamPath = false)
                         .collect { details ->
@@ -1134,9 +1153,7 @@ class MainViewModel(
                 val collector = launch {
                     catalogRepository.getMetaDetailsFlow(type = item.type, id = item.id, videoId = null, guessStreamPath = true)
                         .collect { details ->
-                            val options = catalogRepository.extractStreams(details).mapIndexed { index, coreStream ->
-                                buildStreamOption(index, coreStream)
-                            }
+                            val options = safeBuildStreamOptions(details)
                             if (streams.value.isOpen) {
                                 streams.value = streams.value.copy(
                                     streams = options,
@@ -1154,6 +1171,9 @@ class MainViewModel(
                     )
                 }
             }
+            } catch (error: Throwable) {
+                reportStreamDiscoveryFailure(error)
+            }
         }
     }
 
@@ -1169,27 +1189,28 @@ class MainViewModel(
             error = null,
         )
         streamsJob = viewModelScope.launch {
-            runCatching { startServerInternal() }
-            val collector = launch {
-                catalogRepository.getMetaDetailsFlow(type = item.type, id = item.id, videoId = episode.videoId, guessStreamPath = false)
-                    .collect { details ->
-                        val options = catalogRepository.extractStreams(details).mapIndexed { index, coreStream ->
-                            buildStreamOption(index, coreStream)
+            try {
+                val collector = launch {
+                    catalogRepository.getMetaDetailsFlow(type = item.type, id = item.id, videoId = episode.videoId, guessStreamPath = false)
+                        .collect { details ->
+                            val options = safeBuildStreamOptions(details)
+                            if (streams.value.isOpen) {
+                                streams.value = streams.value.copy(
+                                    streams = options,
+                                    isLoading = options.isEmpty(),
+                                )
+                            }
                         }
-                        if (streams.value.isOpen) {
-                            streams.value = streams.value.copy(
-                                streams = options,
-                                isLoading = options.isEmpty(),
-                            )
-                        }
-                    }
-            }
-            withTimeoutOrNull(30_000) { collector.join() }
-            if (streams.value.isOpen && streams.value.isLoading) {
-                streams.value = streams.value.copy(
-                    isLoading = false,
-                    error = if (streams.value.streams.isEmpty()) "No streams found. Install a stream addon to watch." else null,
-                )
+                }
+                withTimeoutOrNull(30_000) { collector.join() }
+                if (streams.value.isOpen && streams.value.isLoading) {
+                    streams.value = streams.value.copy(
+                        isLoading = false,
+                        error = if (streams.value.streams.isEmpty()) "No streams found. Install a stream addon to watch." else null,
+                    )
+                }
+            } catch (error: Throwable) {
+                reportStreamDiscoveryFailure(error)
             }
         }
     }
@@ -1311,6 +1332,28 @@ class MainViewModel(
         )
     }
 
+    private fun safeBuildStreamOptions(details: com.stremio.core.models.MetaDetails): List<StreamOption> {
+        return catalogRepository.extractStreams(details).mapIndexedNotNull { index, coreStream ->
+            runCatching { buildStreamOption(index, coreStream) }
+                .onFailure { error ->
+                    Timber.w(error, "Skipping malformed stream option from %s", coreStream.addonTitle)
+                }
+                .getOrNull()
+        }
+    }
+
+    private fun reportStreamDiscoveryFailure(error: Throwable) {
+        if (error is kotlinx.coroutines.CancellationException) throw error
+        Timber.e(error, "Stream discovery failed")
+        if (streams.value.isOpen) {
+            streams.value = streams.value.copy(
+                isLoading = false,
+                isResolving = false,
+                error = "Stream discovery failed: ${error.message ?: error::class.java.simpleName}",
+            )
+        }
+    }
+
     fun closeStreams() {
         streamsJob?.cancel()
         streamsJob = null
@@ -1424,6 +1467,17 @@ class MainViewModel(
     }
 
     fun closePlayer() {
+        val currentCast = castState.value
+        val currentPlayback = playbackState.value
+        if (currentCast.connected) {
+            if (currentCast.mediaSource != null && currentCast.mediaSource == currentPlayback.activeUri) {
+                val remote = castController.runtimeState.value
+                if (remote.durationMs > 0L) playbackRepository.reportTimeChanged(remote.positionMs, remote.durationMs)
+            }
+            castActiveSource = null
+            castLoadRequestedFor = null
+            castController.endCurrentSession(stopReceiver = true)
+        }
         playJob?.cancel()
         playJob = null
         nextVideoJob?.cancel()
@@ -1559,13 +1613,11 @@ class MainViewModel(
         )
         nextVideoJob?.cancel()
         nextVideoJob = viewModelScope.launch {
-            runCatching { startServerInternal() }
-            val collector = launch {
+            try {
+                val collector = launch {
                 catalogRepository.getMetaDetailsFlow(type = item.type, id = item.id, videoId = video.id, guessStreamPath = false)
                     .collect { details ->
-                        val options = catalogRepository.extractStreams(details).mapIndexed { index, coreStream ->
-                            buildStreamOption(index, coreStream)
-                        }
+                        val options = safeBuildStreamOptions(details)
                         if (options.isNotEmpty()) {
                             val preferred = lastPlayedOption?.let { last ->
                                 options.firstOrNull { it.addonTitle == last.addonTitle }
@@ -1575,7 +1627,10 @@ class MainViewModel(
                         }
                     }
             }
-            withTimeoutOrNull(30_000) { collector.join() }
+                withTimeoutOrNull(30_000) { collector.join() }
+            } catch (error: Throwable) {
+                reportStreamDiscoveryFailure(error)
+            }
         }
     }
 
@@ -1615,7 +1670,14 @@ class MainViewModel(
         }
     }
 
-    fun getPlayer(): com.stremio.mobile.player.Player? = playbackRepository.getPlayer()
+    fun getPlayer(cast: CastPlaybackState = castState.value): com.stremio.mobile.player.Player? {
+        val currentSource = playbackState.value.activeUri
+        return if (cast.connected && currentSource != null && cast.mediaSource == currentSource) {
+            castPlayer
+        } else {
+            playbackRepository.getPlayer()
+        }
+    }
 
     fun acceptIntent(intent: Intent?) {
         latestIntentUri.value = intent?.dataString
@@ -1973,14 +2035,70 @@ class MainViewModel(
         }
     }
 
-    fun loginWithFacebook(token: String) {
+    fun loginWithFacebook() {
         authInFlight = true
         account.value = account.value.copy(isLoading = true, error = null)
+
+        val state = java.util.UUID.randomUUID().toString().replace("-", "")
+        val loginUrl = "https://www.strem.io/login-fb/$state"
+        val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(loginUrl)).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+
+        val opened = runCatching { appContext.startActivity(browserIntent) }.isSuccess
+        if (!opened) {
+            authInFlight = false
+            account.value = account.value.copy(
+                isLoading = false,
+                error = "Could not open the browser for Facebook login.",
+            )
+            return
+        }
+
         viewModelScope.launch {
-            runCatching { authRepository.loginWithFacebook(token) }.onFailure {
-                authInFlight = false
-                account.value = account.value.copy(isLoading = false, error = it.message ?: "Facebook login failed")
+            repeat(180) {
+                val credentials = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val connection = URL("https://www.strem.io/login-fb-get-acc/$state")
+                            .openConnection() as HttpURLConnection
+                        connection.requestMethod = "GET"
+                        connection.connectTimeout = 5_000
+                        connection.readTimeout = 5_000
+                        connection.setRequestProperty("Accept", "application/json")
+                        try {
+                            if (connection.responseCode !in 200..299) return@runCatching null
+                            val payload = connection.inputStream.bufferedReader().use { it.readText() }
+                            val user = JSONObject(payload).optJSONObject("user") ?: return@runCatching null
+                            val email = user.optString("email").takeIf { value -> value.isNotBlank() }
+                            val token = user.optString("fbLoginToken").takeIf { value -> value.isNotBlank() }
+                            if (email != null && token != null) email to token else null
+                        } finally {
+                            connection.disconnect()
+                        }
+                    }.getOrNull()
+                }
+
+                if (credentials != null) {
+                    runCatching {
+                        authRepository.loginWithFacebookCredentials(credentials.first, credentials.second)
+                    }.onFailure { error ->
+                        authInFlight = false
+                        account.value = account.value.copy(
+                            isLoading = false,
+                            error = error.message ?: "Facebook login failed",
+                        )
+                    }
+                    return@launch
+                }
+
+                delay(1_000)
             }
+
+            authInFlight = false
+            account.value = account.value.copy(
+                isLoading = false,
+                error = "Facebook login timed out. Tap Continue with Facebook to try again.",
+            )
         }
     }
 
@@ -2089,6 +2207,11 @@ class MainViewModel(
                     null
                 }
             }
+    }
+
+    override fun onCleared() {
+        castController.close()
+        super.onCleared()
     }
 
     private fun sha256(input: String): String {
