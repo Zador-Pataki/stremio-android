@@ -7,6 +7,7 @@ import androidx.mediarouter.app.MediaRouteButton
 import com.google.android.gms.cast.framework.CastButtonFactory
 
 @Composable
+// Kept as a standalone Compose wrapper so Cast routing remains isolated from player chrome.
 fun CastRouteButton(modifier: Modifier = Modifier) {
     AndroidView(modifier = modifier, factory = { context ->
         MediaRouteButton(context).apply {
