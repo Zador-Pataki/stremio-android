@@ -178,7 +178,6 @@ fun StremioMobileApp(viewModel: MainViewModel) {
                     error = state.account.error,
                     onLogin = viewModel::login,
                     onFacebookLogin = viewModel::loginWithFacebook,
-                    onFacebookLoginError = viewModel::setAccountError,
                     onSignup = viewModel::signup,
                     onClearError = viewModel::clearAccountError,
                 )
