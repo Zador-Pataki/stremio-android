@@ -734,70 +734,9 @@ class MainViewModel(
     }
 
     fun checkForUpdates(manual: Boolean) {
-        viewModelScope.launch {
-            if (!manual) {
-                if (!isAutoUpdateEnabled.value) return@launch
-                val lastCheckMs = authRepository.getLastUpdateCheckMs()
-                if (System.currentTimeMillis() - lastCheckMs < UPDATE_CHECK_INTERVAL_MS) return@launch
-            }
-
-            com.posthog.PostHog.capture(
-                event = "Update Check Started",
-                properties = mapOf("manual" to manual)
-            )
-
-            _updateState.value = UpdateState.Checking
-            when (val result = runCatching { updateRepository.check() }.getOrElse { error ->
-                UpdateState.Error(error.message ?: "Update check failed.")
-            }) {
-                is UpdateState.Available -> {
-                    authRepository.setLastUpdateCheckMs(System.currentTimeMillis())
-                    com.posthog.PostHog.capture(
-                        event = "Update Check Finished",
-                        properties = mapOf(
-                            "status" to "Available",
-                            "version" to result.info.tagName,
-                            "manual" to manual
-                        )
-                    )
-                    if (!manual && authRepository.getIgnoredUpdateVersion() == result.info.tagName) {
-                        _updateState.value = UpdateState.Idle
-                    } else {
-                        _updateState.value = result
-                    }
-                }
-                is UpdateState.UpToDate -> {
-                    authRepository.setLastUpdateCheckMs(System.currentTimeMillis())
-                    com.posthog.PostHog.capture(
-                        event = "Update Check Finished",
-                        properties = mapOf(
-                            "status" to "UpToDate",
-                            "manual" to manual
-                        )
-                    )
-                    _updateState.value = result
-                }
-                is UpdateState.Error -> {
-                    com.posthog.PostHog.capture(
-                        event = "Update Check Finished",
-                        properties = mapOf(
-                            "status" to "Error",
-                            "error_message" to result.message,
-                            "manual" to manual
-                        )
-                    )
-                    if (manual) {
-                        _updateState.value = result
-                    } else {
-                        Timber.e("Auto update check failed: ${result.message}")
-                        _updateState.value = UpdateState.Idle
-                    }
-                }
-                else -> {
-                    _updateState.value = result
-                }
-            }
-        }
+        // Custom Chromecast build: never offer upstream APKs, because installing one would
+        // replace this build with vanilla Stremio and remove Chromecast support.
+        _updateState.value = UpdateState.Idle
     }
 
     fun downloadAndInstallUpdate(info: UpdateInfo) {
