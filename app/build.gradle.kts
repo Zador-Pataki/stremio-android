@@ -133,8 +133,6 @@ dependencies {
     implementation("androidx.navigation:navigation-compose:2.9.8")
     implementation("androidx.fragment:fragment:1.5.4")
 
-    implementation("com.facebook.android:facebook-login:18.2.3")
-
     implementation(files("libs/rustls-platform-verifier-0.1.1.aar"))
 
     implementation("androidx.media3:media3-exoplayer:1.10.1")
