@@ -305,8 +305,8 @@ class MainViewModel(
         restoreCoreSession()
         checkForUpdates(manual = true)
 
-        startServer() // Always start the streaming server on app startup
-
+        // The native streaming server is started lazily only for streams that need it.
+        // Browsing, authentication, and addon stream discovery do not require the server.
         viewModelScope.launch {
             while (true) {
                 delay(60_000L)
@@ -1061,8 +1061,6 @@ class MainViewModel(
         )
 
         streamsJob = viewModelScope.launch {
-            runCatching { startServerInternal() }
-
             val videoId = if (isSeries) item.continueWatchingVideoId else null
             val matchedOption = runCatching {
                 withTimeoutOrNull(30_000) {
@@ -1081,8 +1079,7 @@ class MainViewModel(
                                     )
                                 }
                             }
-                            catalogRepository.extractStreams(details)
-                                .mapIndexed { index, coreStream -> buildStreamOption(index, coreStream) }
+                            safeBuildStreamOptions(details)
                                 .firstOrNull { rememberedSelection.matches(it) }
                         }
                         .first { it != null }
@@ -1113,9 +1110,8 @@ class MainViewModel(
         streams.value = StreamsUiState(forItem = item, isOpen = true, isLoading = true, isSeries = isSeries)
 
         return viewModelScope.launch {
-            runCatching { startServerInternal() }
-
-            if (isSeries) {
+            try {
+                if (isSeries) {
                 val collector = launch {
                     catalogRepository.getMetaDetailsFlow(type = item.type, id = item.id, videoId = null, guessStreamPath = false)
                         .collect { details ->
@@ -1157,9 +1153,7 @@ class MainViewModel(
                 val collector = launch {
                     catalogRepository.getMetaDetailsFlow(type = item.type, id = item.id, videoId = null, guessStreamPath = true)
                         .collect { details ->
-                            val options = catalogRepository.extractStreams(details).mapIndexed { index, coreStream ->
-                                buildStreamOption(index, coreStream)
-                            }
+                            val options = safeBuildStreamOptions(details)
                             if (streams.value.isOpen) {
                                 streams.value = streams.value.copy(
                                     streams = options,
@@ -1177,6 +1171,9 @@ class MainViewModel(
                     )
                 }
             }
+            } catch (error: Throwable) {
+                reportStreamDiscoveryFailure(error)
+            }
         }
     }
 
@@ -1192,27 +1189,28 @@ class MainViewModel(
             error = null,
         )
         streamsJob = viewModelScope.launch {
-            runCatching { startServerInternal() }
-            val collector = launch {
-                catalogRepository.getMetaDetailsFlow(type = item.type, id = item.id, videoId = episode.videoId, guessStreamPath = false)
-                    .collect { details ->
-                        val options = catalogRepository.extractStreams(details).mapIndexed { index, coreStream ->
-                            buildStreamOption(index, coreStream)
+            try {
+                val collector = launch {
+                    catalogRepository.getMetaDetailsFlow(type = item.type, id = item.id, videoId = episode.videoId, guessStreamPath = false)
+                        .collect { details ->
+                            val options = safeBuildStreamOptions(details)
+                            if (streams.value.isOpen) {
+                                streams.value = streams.value.copy(
+                                    streams = options,
+                                    isLoading = options.isEmpty(),
+                                )
+                            }
                         }
-                        if (streams.value.isOpen) {
-                            streams.value = streams.value.copy(
-                                streams = options,
-                                isLoading = options.isEmpty(),
-                            )
-                        }
-                    }
-            }
-            withTimeoutOrNull(30_000) { collector.join() }
-            if (streams.value.isOpen && streams.value.isLoading) {
-                streams.value = streams.value.copy(
-                    isLoading = false,
-                    error = if (streams.value.streams.isEmpty()) "No streams found. Install a stream addon to watch." else null,
-                )
+                }
+                withTimeoutOrNull(30_000) { collector.join() }
+                if (streams.value.isOpen && streams.value.isLoading) {
+                    streams.value = streams.value.copy(
+                        isLoading = false,
+                        error = if (streams.value.streams.isEmpty()) "No streams found. Install a stream addon to watch." else null,
+                    )
+                }
+            } catch (error: Throwable) {
+                reportStreamDiscoveryFailure(error)
             }
         }
     }
@@ -1332,6 +1330,28 @@ class MainViewModel(
             origin = parsed.origin,
             cleanDescription = parsed.cleanDescription,
         )
+    }
+
+    private fun safeBuildStreamOptions(details: com.stremio.core.models.MetaDetails): List<StreamOption> {
+        return catalogRepository.extractStreams(details).mapIndexedNotNull { index, coreStream ->
+            runCatching { buildStreamOption(index, coreStream) }
+                .onFailure { error ->
+                    Timber.w(error, "Skipping malformed stream option from %s", coreStream.addonTitle)
+                }
+                .getOrNull()
+        }
+    }
+
+    private fun reportStreamDiscoveryFailure(error: Throwable) {
+        if (error is kotlinx.coroutines.CancellationException) throw error
+        Timber.e(error, "Stream discovery failed")
+        if (streams.value.isOpen) {
+            streams.value = streams.value.copy(
+                isLoading = false,
+                isResolving = false,
+                error = "Stream discovery failed: ${error.message ?: error::class.java.simpleName}",
+            )
+        }
     }
 
     fun closeStreams() {
@@ -1593,13 +1613,11 @@ class MainViewModel(
         )
         nextVideoJob?.cancel()
         nextVideoJob = viewModelScope.launch {
-            runCatching { startServerInternal() }
-            val collector = launch {
+            try {
+                val collector = launch {
                 catalogRepository.getMetaDetailsFlow(type = item.type, id = item.id, videoId = video.id, guessStreamPath = false)
                     .collect { details ->
-                        val options = catalogRepository.extractStreams(details).mapIndexed { index, coreStream ->
-                            buildStreamOption(index, coreStream)
-                        }
+                        val options = safeBuildStreamOptions(details)
                         if (options.isNotEmpty()) {
                             val preferred = lastPlayedOption?.let { last ->
                                 options.firstOrNull { it.addonTitle == last.addonTitle }
@@ -1609,7 +1627,10 @@ class MainViewModel(
                         }
                     }
             }
-            withTimeoutOrNull(30_000) { collector.join() }
+                withTimeoutOrNull(30_000) { collector.join() }
+            } catch (error: Throwable) {
+                reportStreamDiscoveryFailure(error)
+            }
         }
     }
 
