@@ -2014,14 +2014,70 @@ class MainViewModel(
         }
     }
 
-    fun loginWithFacebook(token: String) {
+    fun loginWithFacebook() {
         authInFlight = true
         account.value = account.value.copy(isLoading = true, error = null)
+
+        val state = java.util.UUID.randomUUID().toString().replace("-", "")
+        val loginUrl = "https://www.strem.io/login-fb/$state"
+        val browserIntent = Intent(Intent.ACTION_VIEW, Uri.parse(loginUrl)).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+
+        val opened = runCatching { appContext.startActivity(browserIntent) }.isSuccess
+        if (!opened) {
+            authInFlight = false
+            account.value = account.value.copy(
+                isLoading = false,
+                error = "Could not open the browser for Facebook login.",
+            )
+            return
+        }
+
         viewModelScope.launch {
-            runCatching { authRepository.loginWithFacebook(token) }.onFailure {
-                authInFlight = false
-                account.value = account.value.copy(isLoading = false, error = it.message ?: "Facebook login failed")
+            repeat(180) {
+                val credentials = withContext(Dispatchers.IO) {
+                    runCatching {
+                        val connection = URL("https://www.strem.io/login-fb-get-acc/$state")
+                            .openConnection() as HttpURLConnection
+                        connection.requestMethod = "GET"
+                        connection.connectTimeout = 5_000
+                        connection.readTimeout = 5_000
+                        connection.setRequestProperty("Accept", "application/json")
+                        try {
+                            if (connection.responseCode !in 200..299) return@runCatching null
+                            val payload = connection.inputStream.bufferedReader().use { it.readText() }
+                            val user = JSONObject(payload).optJSONObject("user") ?: return@runCatching null
+                            val email = user.optString("email").takeIf { value -> value.isNotBlank() }
+                            val token = user.optString("fbLoginToken").takeIf { value -> value.isNotBlank() }
+                            if (email != null && token != null) email to token else null
+                        } finally {
+                            connection.disconnect()
+                        }
+                    }.getOrNull()
+                }
+
+                if (credentials != null) {
+                    runCatching {
+                        authRepository.loginWithFacebookCredentials(credentials.first, credentials.second)
+                    }.onFailure { error ->
+                        authInFlight = false
+                        account.value = account.value.copy(
+                            isLoading = false,
+                            error = error.message ?: "Facebook login failed",
+                        )
+                    }
+                    return@launch
+                }
+
+                delay(1_000)
             }
+
+            authInFlight = false
+            account.value = account.value.copy(
+                isLoading = false,
+                error = "Facebook login timed out. Tap Continue with Facebook to try again.",
+            )
         }
     }
 
