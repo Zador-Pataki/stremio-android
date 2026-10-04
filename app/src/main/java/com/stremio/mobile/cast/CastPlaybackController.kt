@@ -136,7 +136,7 @@ class CastPlaybackController(context: Context) : AutoCloseable {
             it.registerCallback(callback)
             it.addProgressListener(progressListener, 500L)
         }
-        _state.update { it.copy(connected = true, deviceName = runCatching { session.castDevice.friendlyName }.getOrNull(), error = null) }
+        _state.update { it.copy(connected = true, deviceName = runCatching { session.castDevice?.friendlyName }.getOrNull(), error = null) }
         syncStatus()
     }
 
